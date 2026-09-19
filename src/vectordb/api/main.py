@@ -14,13 +14,13 @@ from pydantic import BaseModel, model_validator
 
 from vectordb.config import settings
 from vectordb.embed.titan import TitanEmbeddingError, TitanEmbedder
-from vectordb.index.brute_force import BruteForceIndex
+from vectordb.index.hnsw import HnswIndex
 
 _NORM_TOL = 1e-3
 
 
 class AppState:
-    index: BruteForceIndex
+    index: HnswIndex
     embedder: TitanEmbedder
     write_lock: asyncio.Lock
 
@@ -30,7 +30,13 @@ state = AppState()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    state.index = BruteForceIndex(dim=settings.dim)
+    state.index = HnswIndex(
+        dim=settings.dim,
+        m=settings.m,
+        m_l0=settings.m_l0,
+        ef_construction=settings.ef_construction,
+        rng_seed=settings.rng_seed,
+    )
     state.embedder = TitanEmbedder()
     state.write_lock = asyncio.Lock()
     yield
@@ -87,9 +93,9 @@ async def stats():
     return {
         "count": idx.count,
         "dim": idx.dim,
-        "layers": 0,  # brute-force has no layers; meaningful once HnswIndex is wired in (Day 8+)
-        "bytes": int(idx._vectors.nbytes),
-        "tombstoned": len(idx._tombstoned),
+        "layers": len(idx.layers),
+        "bytes": int(idx.vectors.nbytes),
+        "tombstoned": int(idx.tombstoned.sum()) if len(idx.tombstoned) else 0,
     }
 
 
