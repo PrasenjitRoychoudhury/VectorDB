@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     m: int = 16
     m_l0: int = 32
     ef_construction: int = 200
-    ef_search_default: int = 64
+    ef_search_default: int = 128  # 64 measured 0.842 recall@10 (fails 0.95 gate) — see test_hnsw_search_delete.py
     rng_seed: int = 42
 
     # embed/

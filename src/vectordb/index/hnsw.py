@@ -203,10 +203,40 @@ class HnswIndex:
             self.entry_point = slot
 
     def search(self, query: np.ndarray, k: int, ef: int) -> list[tuple[int, float]]:
-        raise NotImplementedError("Day 9 — HNSW query-time search (reuses _search_layer at layer 0)")
+        if self.entry_point == -1:
+            return []
+
+        cur_top = len(self.layers) - 1
+        ep = [self.entry_point]
+
+        # greedy single-nearest descent from the top layer down to layer 1 —
+        # identical to insert's descent phase, same routine.
+        for lc in range(cur_top, 0, -1):
+            nearest = self._search_layer(query, ep, ef=1, layer=lc)
+            if nearest:
+                ep = [nearest[0][1]]
+
+        candidates = self._search_layer(query, ep, ef=max(ef, k), layer=0)
+        top_k = candidates[:k]
+        return [(self.slot_to_id[slot], dist) for dist, slot in top_k]
 
     def delete(self, ids: list[int]) -> None:
-        raise NotImplementedError("Day 8 follow-up — tombstone + entry_point reassignment")
+        for id_ in ids:
+            slot = self.id_to_slot.pop(id_, None)
+            if slot is None:
+                continue  # unknown id — ignored silently, per contract
+            self.tombstoned[slot] = True
+            self.free_slots.append(slot)
+
+            if slot == self.entry_point:
+                # Walk layer-0 neighbours for the first live one. None found
+                # (last node) -> entry_point = -1, reclaimed on next add().
+                new_entry = -1
+                for neighbour in self.layers[0].get(slot, []):
+                    if not self.tombstoned[neighbour]:
+                        new_entry = neighbour
+                        break
+                self.entry_point = new_entry
 
     def to_arrays(self) -> dict:
         raise NotImplementedError("Day 11")
