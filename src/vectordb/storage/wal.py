@@ -7,6 +7,8 @@ fsync runs on a dedicated single-worker ThreadPoolExecutor so it never blocks
 the FastAPI event loop (Amendment #3) — a 1-worker pool is already a serial
 queue, so this doubles as write ordering, no extra lock needed here.
 """
+import asyncio
+import os
 import struct
 import zlib
 from concurrent.futures import ThreadPoolExecutor
@@ -34,7 +36,6 @@ class WriteAheadLog:
         self._executor = ThreadPoolExecutor(max_workers=1)
 
     async def append(self, op: int, id_: int, payload: bytes) -> None:
-        import asyncio
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(self._executor, self._write_sync, op, id_, payload)
 
@@ -44,18 +45,24 @@ class WriteAheadLog:
         record = body + _CRC.pack(crc)
         self._fh.write(record)
         self._fh.flush()
-        import os
         os.fsync(self._fh.fileno())
 
+    def close(self) -> None:
+        self._fh.close()
+        self._executor.shutdown(wait=True)
+
     @staticmethod
-    def replay(path: Path) -> Iterator[WalRecord]:
-        """Reads sequentially; stops (does not raise) at the first bad CRC —
-        a torn tail after a crash is expected, not an error."""
+    def replay_with_offset(path: Path) -> tuple[list[WalRecord], int]:
+        """Parses sequentially; stops — does not raise — at the first bad
+        CRC, per contract (a torn tail after a crash is expected). Returns
+        (records, offset) where offset is how many leading bytes were
+        successfully validated, so a caller can truncate the torn tail."""
         if not path.exists():
-            return
+            return [], 0
         with open(path, "rb") as f:
             data = f.read()
         offset = 0
+        records: list[WalRecord] = []
         while offset < len(data):
             if offset + _HEADER.size > len(data):
                 break  # torn header
@@ -68,8 +75,14 @@ class WriteAheadLog:
             body = data[offset:offset + _HEADER.size + payload_len]
             if zlib.crc32(body) != crc_stored:
                 break  # torn/corrupt record
-            yield WalRecord(op, id_, payload)
+            records.append(WalRecord(op, id_, payload))
             offset = record_end
+        return records, offset
+
+    @staticmethod
+    def replay(path: Path) -> Iterator[WalRecord]:
+        records, _ = WriteAheadLog.replay_with_offset(path)
+        yield from records
 
     @staticmethod
     def truncate_at(path: Path, offset: int) -> None:

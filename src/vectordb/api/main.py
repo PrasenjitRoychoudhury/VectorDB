@@ -15,6 +15,8 @@ from pydantic import BaseModel, model_validator
 from vectordb.config import settings
 from vectordb.embed.titan import TitanEmbeddingError, TitanEmbedder
 from vectordb.index.hnsw import HnswIndex
+from vectordb.storage.recovery import recover
+from vectordb.storage.wal import OP_ADD, OP_DELETE, WriteAheadLog
 
 _NORM_TOL = 1e-3
 
@@ -22,6 +24,7 @@ _NORM_TOL = 1e-3
 class AppState:
     index: HnswIndex
     embedder: TitanEmbedder
+    wal: WriteAheadLog
     write_lock: asyncio.Lock
 
 
@@ -30,16 +33,14 @@ state = AppState()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    state.index = HnswIndex(
-        dim=settings.dim,
-        m=settings.m,
-        m_l0=settings.m_l0,
-        ef_construction=settings.ef_construction,
-        rng_seed=settings.rng_seed,
-    )
+    # Recovery first (builds the index from whatever's on disk), then open
+    # the WAL for new writes — matches the design doc's recovery sequence.
+    state.index = recover(settings.data_dir, settings.dim)
+    state.wal = WriteAheadLog(settings.data_dir / "wal.log")
     state.embedder = TitanEmbedder()
     state.write_lock = asyncio.Lock()
     yield
+    state.wal.close()
 
 
 app = FastAPI(title="vectordb", lifespan=lifespan)
@@ -117,6 +118,8 @@ async def add_vectors(body: VectorsIn):
             state.index.add(body.ids, vecs)
         except ValueError as e:
             raise HTTPException(status_code=409, detail=str(e))
+        for id_, vec in zip(body.ids, vecs):
+            await state.wal.append(OP_ADD, id_, vec.astype("<f4").tobytes())
     return {"added": len(body.ids)}
 
 
@@ -142,4 +145,6 @@ async def search(body: SearchIn):
 async def delete_vectors(body: DeleteIn):
     async with state.write_lock:
         state.index.delete(body.ids)
+        for id_ in body.ids:
+            await state.wal.append(OP_DELETE, id_, b"")
     return {"deleted": len(body.ids)}
